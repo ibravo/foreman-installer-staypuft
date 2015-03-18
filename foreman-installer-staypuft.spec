@@ -9,7 +9,7 @@
 
 Name:       foreman-installer-staypuft
 Epoch:      1
-Version:    0.3.2
+Version:    0.5.7
 Release:    1%{?dotalphatag}%{?dist}
 Summary:    Foreman-installer plugin that allows you to install staypuft
 Group:      Applications/System
@@ -24,9 +24,11 @@ Requires:   ntp
 Requires:   rubygem-kafo >= 0.6.4
 Requires:   rubygem-foreman_api >= 0.1.4
 Requires:   git
+Requires:   %{name}-client = %{epoch}:%{version}-%{release}
 
-%if 0%{?fedora} > 18
+%if 0%{?fedora} > 18 || 0%{?rhel} > 6
 Requires:   %{?scl_prefix}ruby(release)
+Requires:   iptables-services
 %else
 Requires:   %{?scl_prefix}ruby(abi)
 %endif
@@ -34,6 +36,21 @@ Requires:   %{?scl_prefix}ruby(abi)
 %description
 This is a Foreman-installer plugins that allows you to install and configure
 staypuft foreman plugin
+
+%package client
+Summary:    A staypuft client installer which registers a host in staypuft
+BuildArch:  noarch
+Requires:   foreman-installer >= 1.5.0
+Requires:   rubygem-kafo >= 0.6.0
+%if 0%{?fedora} > 18 || 0%{?rhel} > 6
+Requires:   %{?scl_prefix}ruby(release)
+%else
+Requires:   %{?scl_prefix}ruby(abi)
+%endif
+
+%description client
+This package installs subset of foreman-installer-staypuft files so it can
+be used only for registering a new client to staypuft instance.
 
 %prep
 %setup -q -n %{name}-%{version}%{?dashalphatag}
@@ -49,7 +66,10 @@ install -d -m0755 %{buildroot}%{_datadir}/foreman-installer
 cp -R hooks modules %{buildroot}%{_datadir}/foreman-installer
 install -d -m0755 %{buildroot}%{_sbindir}
 cp bin/staypuft-installer %{buildroot}%{_sbindir}/staypuft-installer
+cp bin/staypuft-client-installer %{buildroot}%{_sbindir}/staypuft-client-installer
+install -d -m0755 %{buildroot}%{_bindir}
 install -d -m0755 %{buildroot}%{_sysconfdir}/foreman/
+cp config/staypuft-client-installer.yaml %{buildroot}%{_sysconfdir}/foreman/staypuft-client-installer.yaml
 cp config/staypuft-installer.yaml %{buildroot}%{_sysconfdir}/foreman/staypuft-installer.yaml
 cp config/staypuft-installer.answers.yaml %{buildroot}%{_sysconfdir}/foreman/staypuft-installer.answers.yaml
 
@@ -69,15 +89,148 @@ cp config/staypuft-installer.answers.yaml %{buildroot}%{_sysconfdir}/foreman/sta
 %{_datadir}/foreman-installer/hooks/post/10-setup_provisioning.rb
 %{_datadir}/foreman-installer/hooks/pre_validations/10-gather_and_set_staypuft_values.rb
 %{_datadir}/foreman-installer/hooks/pre_values/10-register_staypuft_modules.rb
+%{_datadir}/foreman-installer/modules/firewall
 %{_datadir}/foreman-installer/modules/network
+%{_datadir}/foreman-installer/modules/ssh_keygen
+%{_datadir}/foreman-installer/modules/sshkeypair
 %{_datadir}/foreman-installer/modules/foreman/manifests/plugin/staypuft.pp
+%{_datadir}/foreman-installer/modules/foreman/manifests/plugin/staypuft_client.pp
 %{_datadir}/foreman-installer/modules/foreman/manifests/plugin/staypuft_network.pp
+%{_datadir}/foreman-installer/modules/foreman/manifests/puppet/agent/service.pp
 
 %config %attr(600, root, root) %{_sysconfdir}/foreman/staypuft-installer.yaml
 %config(noreplace) %attr(600, root, root) %{_sysconfdir}/foreman/staypuft-installer.answers.yaml
 %{_sbindir}/staypuft-installer
 
+%files client
+%doc LICENSE
+%{_datadir}/foreman-installer/hooks/boot/10-add_client_options.rb
+%{_datadir}/foreman-installer/hooks/post/10-register_in_staypuft.rb
+%{_datadir}/foreman-installer/modules/foreman/manifests/plugin/staypuft_client.pp
+%config %attr(600, root, root) %{_sysconfdir}/foreman/staypuft-client-installer.yaml
+%{_sbindir}/staypuft-client-installer
+
 %changelog
+* Wed Mar 11 2015 Brad P. Crochet <brad@redhat.com> 0.5.7-1
+- BZ#1196310 and BZ#1199827 (alessandro@ams0.org)
+- BZ #1131584 Ensure fd0 is not in /proc/partitions (alessandro@ams0.org)
+- BZ#1199827 Disable all repos before enabling (alessandro@ams0.org)
+- rhbz#1196310 - include rhel-ha repo by default (alessandro@ams0.org)
+- Revert "BZ #1180322: Install mariadb on controllers before puppet"
+  (mburns@redhat.com)
+- rhbz#1188492 remove commented snippet (mburns@redhat.com)
+- disable epel on RHEL default kickstart (mburns@redhat.com)
+
+* Thu Feb 12 2015 Brad P. Crochet <brad@redhat.com> 0.5.6-1
+- BZ #1191732: Add ntp-servers to OS parameters (brad@redhat.com)
+- BZ#1180322 - errors on registration puppet run (jistr@redhat.com)
+- BZ #1180322: Install mariadb on controllers before puppet (brad@redhat.com)
+- rhbz#1182881 allow spaces in sub-man repos (mburns@redhat.com)
+
+* Thu Jan 08 2015 Brad P. Crochet <brad@redhat.com> 0.5.5-1
+- BZ #1173634 - deployment runs without completing/failing (jistr@redhat.com)
+
+* Tue Dec 16 2014 Brad P. Crochet <brad@redhat.com> 0.5.4-1
+- BZ #1174837: Fix tenant subnet check (brad@redhat.com)
+
+* Fri Dec 12 2014 Brad P. Crochet <brad@redhat.com> 0.5.3-1
+- require iptables-services on EL7 (mburns@redhat.com)
+- BZ #1173634: deployment runs without completing/failing (jistr@redhat.com)
+- BZ #1148947: Make kickstart template consistent with disk layout
+  (brad@redhat.com)
+- BZ #1152543: 2 of 2 - use only autodetection for 'Foreman URL'
+  (jistr@redhat.com)
+- BZ #1152543: 1 of 2 - fix error message printing (jistr@redhat.com)
+- BZ #1172851: include rh common channel by default (mburns@redhat.com)
+
+* Tue Dec 09 2014 Brad P. Crochet <brad@redhat.com> 0.5.2-1
+- Add rhel 7 and fix section label (brad@redhat.com)
+- the installer repo is required for client installation (mburns@redhat.com)
+- BZ #1169980: Disable firewalld before setting up iptables (brad@redhat.com)
+
+* Wed Nov 26 2014 Brad P. Crochet <brad@redhat.com> 0.5.1-1
+- BZ #1151274: Add support for setting MTU on tenant network (brad@redhat.com)
+- BZ#1167880 puppet error "Could not find class quickstack::openstack_common"
+  (jistr@redhat.com)
+- Remove manual host registration (jistr@redhat.com)
+- should say to install client on the remote host (mburns@redhat.com)
+
+* Wed Nov 19 2014 Brad P. Crochet <brad@redhat.com> 0.5.0-2
+- Add epoch to client requires line (brad@redhat.com)
+- Update spec to have main package depend on client package (brad@redhat.com)
+
+* Tue Nov 18 2014 Brad P. Crochet <brad@redhat.com> 0.5.0-1
+- move to OSP 6 (mburns@redhat.com)
+- BZ #1162794: Properly configure bond interfaces with vlans (brad@redhat.com)
+- Remove EPEL repo from RHEL (jistr@redhat.com)
+- BZ #1158680: Let primary interface participate in bonds (brad@redhat.com)
+- BZ #1129521: Unconfigured interfaces should be ONBOOT=no (brad@redhat.com)
+- Correct the config when a bond and vlan are used together (brad@redhat.com)
+- BZ #1157819: Set DEFROUTE=no on all interfaces by default (brad@redhat.com)
+- Revert "bz#1152516 don't autostart networking in discovery image"
+  (mburns@redhat.com)
+- Workaround for http://projects.theforeman.org/issues/7975 (jistr@redhat.com)
+- Wait for certificate to allow manual signing (jistr@redhat.com)
+- Fail the installer if the registration puppet run fails (jistr@redhat.com)
+- Wait for client registration to finish (jistr@redhat.com)
+- Remove puppetmaster param from staypuft_client.pp (jistr@redhat.com)
+- Set staypuft_ssh_public_key as a host parameter (jistr@redhat.com)
+- Rename param to staypuft_ssh_public_key for consistency (jistr@redhat.com)
+- Make the RPM installable on RHEL 7 (jistr@redhat.com)
+- Pass settings as string when using Foreman > 1.6 (jistr@redhat.com)
+- Fix a syntax error (jistr@redhat.com)
+- Remove get_ready implementation from ProvisioningWizard (brad@redhat.com)
+- no-daemonize puppetssh commmand (mtaylor@redhat.com)
+- Add staypuft-client-installer (mhulan@redhat.com)
+- bz#1152516 don't autostart networking in discovery image (mburns@redhat.com)
+
+* Wed Oct 15 2014 Brad P. Crochet <brad@redhat.com> 0.4.4-1
+- BZ #1148746: Assign DEFROUTE to vlan or bond (brad@redhat.com)
+
+* Thu Oct 09 2014 Brad P. Crochet <brad@redhat.com> 0.4.3-1
+- Add staypuft-register-host command (jistr@redhat.com)
+- Add custom repositories snippet (mhulan@redhat.com)
+- BZ#1147577: Add biosboot partition in case GPT disk label (brad@redhat.com)
+
+* Wed Oct 08 2014 Brad P. Crochet <brad@redhat.com> 0.4.2-1
+- Merge pull request #95 from ares/bonding (brad@redhat.com)
+- Merge pull request #99 from mburns72h/bz1148435 (ares@igloonet.cz)
+- rhbz#1148435 use single quotes for passwords (mburns@redhat.com)
+- Remove 'service network restart' from network config snippet
+  (brad@redhat.com)
+- Update readme (mhulan@redhat.com)
+- Configure gateway if bootmode is static (mhulan@redhat.com)
+- Install provisioning template that configures bonds (mhulan@redhat.com)
+- Add local RPM building instructions to readme (jistr@redhat.com)
+
+* Tue Sep 23 2014 Marek Hulan <mhulan@redhat.com> 0.4.1-1
+- Fix whitespace in condition (mhulan@redhat.com)
+- BZ#1142182 - provisioned hosts have wrong timezone (jistr@redhat.com)
+- Fix possible renaming issue (mhulan@redhat.com)
+- Refs BZ#1142295 - Configure DEFROUTE according to subnet assignment
+  (mhulan@redhat.com)
+
+* Fri Sep 19 2014 Marek Hulan <mhulan@redhat.com> 0.4.0-1
+- Add firewall as hard dependency (mhulan@redhat.com)
+- Fix BZ#1142211 - NM changed fqdn in %%post (mhulan@redhat.com)
+
+* Mon Sep 15 2014 Marek Hulan <mhulan@redhat.com> 0.3.5-1
+- disable biosdevname for discovery image (mburns@redhat.com)
+- rhbz#1140741 sub-man pool is recommended (mburns@redhat.com)
+- rhbz#1140057 don't run auto-attach if pool is specified (mburns@redhat.com)
+- Update docs regarding discovery images (mhulan@redhat.com)
+
+* Thu Sep 04 2014 Marek Hulan <mhulan@redhat.com> 0.3.4-1
+- Primary network is has always DHCP boot mode (mhulan@redhat.com)
+- BZ#1134610 - multiple repos in subscription_manager_repos (jistr@redhat.com)
+- Install modules from git on CentOS (mhulan@redhat.com)
+- Modify kickstart templates to configure networking (mhulan@redhat.com)
+- BZ#1127196 - ask for password confirmation (jistr@redhat.com)
+- Update readme (mhulan@redhat.com)
+
+* Mon Aug 25 2014 Marek Hulan <mhulan@redhat.com> 0.3.3-1
+- fix syntax from last fix (mburns@redhat.com)
+
 * Fri Aug 22 2014 Marek Hulan <mhulan@redhat.com> 0.3.2-1
 - Create config templates even if they are missing (mhulan@redhat.com)
 - Adds support for CentOS 7 (mhulan@redhat.com)

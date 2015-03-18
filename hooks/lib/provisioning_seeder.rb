@@ -20,6 +20,15 @@ class ProvisioningSeeder < BaseSeeder
     @default_root_pass = kafo.param('foreman_plugin_staypuft', 'root_password').instance_variable_get('@value')
     @default_ssh_public_key = kafo.param('foreman_plugin_staypuft', 'ssh_public_key').value
     @ntp_host = kafo.param('foreman_plugin_staypuft', 'ntp_host').value
+    @timezone = kafo.param('foreman_plugin_staypuft', 'timezone').value
+
+    begin
+      pub_key_path = kafo.param('sshkeypair', 'foreman_proxy_home').value + '/.ssh/id_rsa.pub'
+      @pub_key = File.read(pub_key_path).split(' ')[1]
+    rescue => e
+      say "Could not read SSH public key from #{pub_key_path} - #{e.message}, answer file will be <%= color('broken', :bad) %>"
+      @pub_key = 'broken'
+    end
   end
 
   def seed
@@ -33,7 +42,7 @@ class ProvisioningSeeder < BaseSeeder
                                                      'fullname' => 'Default domain used for provisioning',
                                                      'dns_id' => default_proxy['id']})
 
-    default_subnet = @foreman.subnet.show_or_ensure({'id' => 'default'},
+    default_subnet = @foreman.subnet.find_or_ensure('name=default',
                                                     {'name' => 'default',
                                                      'mask' => @netmask,
                                                      'network' => @network,
@@ -44,13 +53,20 @@ class ProvisioningSeeder < BaseSeeder
                                                      'domain_ids' => [default_domain['id']],
                                                      'dns_id' => default_proxy['id'],
                                                      'dhcp_id' => default_proxy['id'],
-                                                     'tftp_id' => default_proxy['id']})
+                                                     'tftp_id' => default_proxy['id'],
+                                                     'boot_mode' => 'DHCP'})
 
     kinds = @foreman.template_kind.index
     provisioning = kinds.detect { |k| k['name'] == 'provision' }
     pxe_linux = kinds.detect { |k| k['name'] == 'PXELinux' }
     @foreman.config_template.show_or_ensure({'id' => 'redhat_register'},
                                             {'template' => redhat_register_snippet, 'snippet' => '1', 'name' => 'redhat_register'})
+    @foreman.config_template.show_or_ensure({'id' => 'custom_deployment_repositories'},
+                                            {'template' => custom_deployment_repositories_snippet, 'snippet' => '1', 'name' => 'custom_deployment_repositories'})
+    @foreman.config_template.show_or_ensure({'id' => 'staypuft-client-installer-answers-yaml'},
+                                            {'template' => staypuft_staypuft_answers_snippet, 'name' => 'staypuft-client-installer-answers-yaml', 'snippet' => '1'})
+    @foreman.config_template.show_or_ensure({'id' => 'staypuft_client_bootstrap'},
+                                            {'template' => staypuft_bootstrap_snippet, 'name' => 'staypuft_client_bootstrap', 'snippet' => '1'})
     @foreman.config_template.show_or_ensure({'id' => 'Kickstart RHEL default'},
                                             {'template' => kickstart_rhel_default, 'template_kind_id' => provisioning['id'], 'name' => 'Kickstart RHEL default'})
     @foreman.config_template.show_or_ensure({'id' => 'Kickstart default'},
@@ -59,6 +75,8 @@ class ProvisioningSeeder < BaseSeeder
                                             {'template' => kickstart_default_pxelinux, 'template_kind_id' => pxe_linux['id'], 'name' => 'Kickstart default PXELinux'})
     @foreman.config_template.show_or_ensure({'id' => 'ssh_public_key'},
                                             {'template' => ssh_public_key_snippet, 'snippet' => '1', 'name' => 'ssh_public_key'})
+    @foreman.config_template.show_or_ensure({'id' => 'kickstart_networking_setup'},
+                                            {'template' => kickstart_networking_setup_snippet, 'snippet' => '1', 'name' => 'kickstart_networking_setup'})
 
     @foreman.partition_table.show_or_ensure({'id' => 'LVM with cinder-volumes',
                                              'name' => 'LVM with cinder-volumes',
@@ -75,6 +93,19 @@ class ProvisioningSeeder < BaseSeeder
                                                            {'template' => template})
 
     @foreman.config_template.build_pxe_default
+
+    puppet_klass = @foreman.puppetclass.search('name = foreman::puppet::agent::service')['foreman'].first
+    smart_parameter = @foreman.smart_class_parameter.first('puppetclass = foreman::puppet::agent::service and key = runmode')
+    @foreman.smart_class_parameter.show_or_ensure({'id' => smart_parameter['id']},
+                                                  {'override' => true, 'default_value' => 'none'})
+
+    staypuft_client_klass = @foreman.puppetclass.search('name = foreman::plugin::staypuft_client')['foreman'].first
+    smart_parameter = @foreman.smart_class_parameter.first('puppetclass = foreman::plugin::staypuft_client and key = staypuft_ssh_public_key')
+    @foreman.smart_class_parameter.show_or_ensure({'id' => smart_parameter['id']},
+                                                  {'override' => true, 'default_value' => @pub_key})
+
+    klasses = [puppet_klass, staypuft_client_klass]
+    puppet_class_ids = klasses.map { |klass| klass['id'] }
 
     @hostgroups = []
     oses = find_default_oses(foreman_host)
@@ -109,11 +140,18 @@ class ProvisioningSeeder < BaseSeeder
                          'ptable_id' => ptable['id'],
                          'puppet_ca_proxy_id' => default_proxy['id'],
                          'puppet_proxy_id' => default_proxy['id'],
-                         'subnet_id' => default_subnet['id']}
+                         'subnet_id' => default_subnet['id'],
+                         'puppetclass_ids' => puppet_class_ids}
+
       hostgroup_attrs['medium_id'] = medium['id'] unless medium.nil?
 
       hostgroup = @foreman.hostgroup.show_or_ensure({'id' => group_id}, hostgroup_attrs)
 
+      @foreman.parameter.show_or_ensure({'id' => 'staypuft_ssh_public_key', 'operatingsystem_id' => os['id']},
+                                        {
+                                            'name' => 'staypuft_ssh_public_key',
+                                            'value' => @pub_key,
+                                        })
       if !@default_ssh_public_key.nil? && !@default_ssh_public_key.empty?
         @foreman.parameter.show_or_ensure({'id' => 'ssh_public_key', 'operatingsystem_id' => os['id']},
                                           {
@@ -124,7 +162,17 @@ class ProvisioningSeeder < BaseSeeder
       @foreman.parameter.show_or_ensure({'id' => 'ntp-server', 'operatingsystem_id' => os['id']},
                                         {
                                             'name' => 'ntp-server',
+                                            'value' => @ntp_host.split(',').first,
+                                        })
+      @foreman.parameter.show_or_ensure({'id' => 'ntp-servers', 'operatingsystem_id' => os['id']},
+                                        {
+                                            'name' => 'ntp-servers',
                                             'value' => @ntp_host,
+                                        })
+      @foreman.parameter.show_or_ensure({'id' => 'time-zone', 'operatingsystem_id' => os['id']},
+                                        {
+                                            'name' => 'time-zone',
+                                            'value' => @timezone,
                                         })
       @hostgroups.push hostgroup
     end
@@ -134,6 +182,7 @@ class ProvisioningSeeder < BaseSeeder
     setup_idle_timeout
     setup_default_root_pass
     setup_ignore_puppet_facts_for_provisioning
+    setup_puppetrun
     create_discovery_env(pxe_template)
 
     say HighLine.color("Use '#{default_hostgroup['name']}' hostgroup for provisioning", :good)
@@ -152,19 +201,11 @@ class ProvisioningSeeder < BaseSeeder
   end
 
   def setup_setting(default_hostgroup)
-    @foreman.setting.show_or_ensure({'id' => 'base_hostgroup'},
-                                    {'value' => default_hostgroup['name'].to_s})
-  rescue NoMethodError => e
-    @logger.error "Setting with name 'base_hostgroup' not found, you must run 'foreman-rake db:seed' " +
-                      "and rerun installer to fix this issue."
+    adjust_setting('base_hostgroup', default_hostgroup['name'].to_s)
   end
 
   def setup_idle_timeout
-    @foreman.setting.show_or_ensure({'id' => 'idle_timeout'},
-                                    {'value' => @foreman.version.start_with?('1.6') ? 180 : '180'})
-  rescue NoMethodError => e
-    @logger.error "Setting with name 'idle_timeout' not found, you must run 'foreman-rake db:seed' " +
-                      "and rerun installer to fix this issue."
+    adjust_setting('idle_timeout', @foreman.version.start_with?('1.6') ? 180 : '180')
   end
 
   def setup_ignore_puppet_facts_for_provisioning
@@ -177,10 +218,18 @@ class ProvisioningSeeder < BaseSeeder
   end
 
   def setup_default_root_pass
-    @foreman.setting.show_or_ensure({'id' => 'root_pass'},
-                                    {'value' => @default_root_pass.to_s.crypt('$5$fm')})
+    adjust_setting('root_pass', @default_root_pass)
+  end
+
+  def setup_puppetrun
+    adjust_setting('puppetrun', @foreman.version.start_with?('1.6') ? true : 'true')
+  end
+
+  def adjust_setting(id, value)
+    @foreman.setting.show_or_ensure({'id' => id},
+                                    {'value' => value})
   rescue NoMethodError => e
-    @logger.error "Setting with name 'root_pass' not found, you must run 'foreman-rake db:seed' " +
+    @logger.error "Setting with name '#{id}' not found, you must run 'foreman-rake db:seed' " +
                       "and rerun installer to fix this issue."
   end
 
@@ -192,6 +241,7 @@ class ProvisioningSeeder < BaseSeeder
       default_ptable_name = 'Preseed default'
       additional_ptable_names = []
     end
+
     default_ptable = nil
     additional_ptables_names.push(default_ptable_name).each do |ptable_name|
       ptable = @foreman.partition_table.first! %Q(name ~ "#{ptable_name}*")
@@ -200,6 +250,7 @@ class ProvisioningSeeder < BaseSeeder
         ids = @foreman.partition_table.show!('id' => ptable['id'])['operatingsystems'].map { |o| o['id'] }
         @foreman.partition_table.update 'id' => ptable['id'], 'ptable' => {'operatingsystem_ids' => (ids + [os['id']]).uniq}
       end
+
     end
     default_ptable
   end
@@ -280,7 +331,11 @@ lang en_US.UTF-8
 selinux --enforcing
 keyboard us
 skipx
-network --bootproto <%= @static ? "static --ip=#{@host.ip} --netmask=#{@host.subnet.mask} --gateway=#{@host.subnet.gateway} --nameserver=#{[@host.subnet.dns_primary, @host.subnet.dns_secondary].reject { |n| n.blank? }.join(',')}" : 'dhcp' %> --hostname <%= @host %>
+
+<% subnet = @host.subnet -%>
+<% dhcp = subnet.dhcp_boot_mode? -%>
+network --bootproto <%= dhcp ? 'dhcp' : "static --ip=#{@host.ip} --netmask=#{subnet.mask} --gateway=#{subnet.gateway} --nameserver=#{[subnet.dns_primary, subnet.dns_secondary].select(&:present?).join(',')}" %> --device=<%= @host.mac -%> --hostname <%= @host %>
+
 rootpw --iscrypted <%= root_pass %>
 firewall --<%= os_major >= 6 ? 'service=' : '' %>ssh
 authconfig --useshadow --passalgo=sha256 --kickstart
@@ -315,7 +370,6 @@ dhclient
 ntp
 wget
 @Core
-epel-release
 <% if puppet_enabled %>
 puppet
 <% if @host.params['enable-puppetlabs-repo'] && @host.params['enable-puppetlabs-repo'] == 'true' -%>
@@ -331,7 +385,7 @@ EOF
 
 # ensures a valid disk is addressed in the partition table layout
 # sda is assumed and replaced if it is not correct
-sed -i "s/sda/$(cat /proc/partitions | awk '{ print $4 }' | grep -e "^.d.$" | sort | head -1)/" /tmp/diskpart.cfg
+sed -i "s/sda/$(cat /proc/partitions | awk '{ print $4 }' | grep -e "^.d.$" | grep -vw fd0 | sort | head -1)/" /tmp/diskpart.cfg
 %end
 
 %post --nochroot
@@ -350,43 +404,7 @@ exec < /dev/tty3 > /dev/tty3
 #changing to VT 3 so that we can see whats going on....
 /usr/bin/chvt 3
 (
-# set ONBOOT to yes for all nics
-# also set PEERDNS=no for all nics except provisioning interface
-# (resolves https://bugzilla.redhat.com/show_bug.cgi?id=1124027)
-# also set DEFROUTE=no for all nics except provisioning interface
-# (resolves https://bugzilla.redhat.com/show_bug.cgi?id=1124598)
-
-# get name of provisioning interface
-PROVISION_IFACE=$(ip route  | awk '$1 == "default" {print $5}' | head -1)
-echo "found provisioning interface = $PROVISION_IFACE"
-
-IFACES=$(ls -d /sys/class/net/* | while read iface; do readlink $iface | grep -q virtual || echo ${iface##*/}; done)
-for i in $IFACES; do
-    sed -i 's/ONBOOT.*/ONBOOT=yes/' /etc/sysconfig/network-scripts/ifcfg-$i
-    if [ "$i" != "$PROVISION_IFACE" ]; then
-        echo "setting PEERDNS=no on $i"
-        sed -i '
-            /PEERDNS/ d
-            $ a\PEERDNS=no
-        ' /etc/sysconfig/network-scripts/ifcfg-$i
-<% unless @host.hostgroup.to_s.include?("Controller") %>
-        echo "setting DEFROUTE=no on $i"
-        sed -i '
-            /DEFROUTE/ d
-            $ a\DEFROUTE=no
-        ' /etc/sysconfig/network-scripts/ifcfg-$i
-<% end -%>
-    fi
-done
-<% if @host.hostgroup.to_s.include?("Controller") %>
-echo "setting DEFROUTE=no on $PROVISION_IFACE"
-sed -i '
-    /DEFROUTE/ d
-    $ a\DEFROUTE=no
-' /etc/sysconfig/network-scripts/ifcfg-$PROVISION_IFACE
-<% end -%>
-
-
+<%= snippet 'kickstart_networking_setup' %>
 
 #update local time
 echo "updating system time"
@@ -401,6 +419,7 @@ chkconfig network on
 <%= snippet 'ssh_public_key' %>
 
 <%= snippet 'redhat_register' %>
+<%= snippet 'custom_deployment_repositories' %>
 
 <% if @host.info["parameters"]["realm"] && @host.otp && @host.realm && @host.realm.realm_type == "Red Hat Directory Server" && os_major <= 6 -%>
 <%= snippet "freeipa_register" %>
@@ -416,15 +435,8 @@ yum -t -y -e 0 remove firewalld
 # and add the puppet package
 yum -t -y -e 0 install puppet
 
-echo "Configuring puppet"
-cat > /etc/puppet/puppet.conf << EOF
-<%= snippet 'puppet.conf' %>
-EOF
-
-# Setup puppet to run on system reboot
-/sbin/chkconfig --level 345 puppet on
-
-/usr/bin/puppet agent --config /etc/puppet/puppet.conf -o --tags no_such_tag <%= @host.puppetmaster.blank? ? '' : "--server #{@host.puppetmaster}" %> --no-daemonize
+# we reuse our machine registerer instead
+<%= snippet 'staypuft_client_bootstrap' %>
 
 <% end -%>
 
@@ -472,7 +484,11 @@ lang en_US.UTF-8
 selinux --enforcing
 keyboard us
 skipx
-network --bootproto <%= @static ? "static --ip=#{@host.ip} --netmask=#{@host.subnet.mask} --gateway=#{@host.subnet.gateway} --nameserver=#{[@host.subnet.dns_primary, @host.subnet.dns_secondary].reject { |n| n.blank? }.join(',')}" : 'dhcp' %> --hostname <%= @host %>
+
+<% subnet = @host.subnet -%>
+<% dhcp = subnet.dhcp_boot_mode? -%>
+network --bootproto <%= dhcp ? 'dhcp' : "static --ip=#{@host.ip} --netmask=#{subnet.mask} --gateway=#{subnet.gateway} --nameserver=#{[subnet.dns_primary, subnet.dns_secondary].select(&:present?).join(',')}" %> --device=<%= @host.mac -%> --hostname <%= @host %>
+
 rootpw --iscrypted <%= root_pass %>
 firewall --<%= os_major >= 6 ? 'service=' : '' %>ssh
 authconfig --useshadow --passalgo=sha256 --kickstart
@@ -487,12 +503,14 @@ realm join --one-time-password='<%= @host.otp %>' <%= @host.realm %>
 
 <% if @host.operatingsystem.name == 'Fedora' -%>
 repo --name=fedora-everything --mirrorlist=https://mirrors.fedoraproject.org/metalink?repo=fedora-<%= @host.operatingsystem.major %>&arch=<%= @host.architecture %>
+repo --name=foreman-nightly --baseurl=http://yum.theforeman.org/plugins/nightly/f<%= @host.operatingsystem.major %>/<%= @host.architecture %>
 <% if puppet_enabled && @host.params['enable-puppetlabs-repo'] && @host.params['enable-puppetlabs-repo'] == 'true' -%>
 repo --name=puppetlabs-products --baseurl=http://yum.puppetlabs.com/fedora/f<%= @host.operatingsystem.major %>/products/<%= @host.architecture %>
 repo --name=puppetlabs-deps --baseurl=http://yum.puppetlabs.com/fedora/f<%= @host.operatingsystem.major %>/dependencies/<%= @host.architecture %>
 <% end -%>
 <% elsif rhel_compatible && os_major > 4 -%>
 repo --name="Extra Packages for Enterprise Linux" --mirrorlist=https://mirrors.fedoraproject.org/metalink?repo=epel-<%= @host.operatingsystem.major %>&arch=<%= @host.architecture %>
+repo --name=foreman-nightly --baseurl=http://yum.theforeman.org/plugins/nightly/el<%= @host.operatingsystem.major %>/<%= @host.architecture %>
 <% if puppet_enabled && @host.params['enable-puppetlabs-repo'] && @host.params['enable-puppetlabs-repo'] == 'true' -%>
 repo --name=puppetlabs-products --baseurl=http://yum.puppetlabs.com/el/<%= @host.operatingsystem.major %>/products/<%= @host.architecture %>
 repo --name=puppetlabs-deps --baseurl=http://yum.puppetlabs.com/el/<%= @host.operatingsystem.major %>/dependencies/<%= @host.architecture %>
@@ -507,11 +525,7 @@ part biosboot --fstype=biosboot --size=1
 bootloader --location=mbr --append="nofb quiet splash=quiet" <%= grub_pass %>
 <% end -%>
 
-<% if @dynamic -%>
 %include /tmp/diskpart.cfg
-<% else -%>
-<%= @host.diskLayout %>
-<% end -%>
 
 text
 reboot
@@ -531,11 +545,15 @@ puppetlabs-release
 <% end -%>
 %end
 
-<% if @dynamic -%>
+
 %pre
+cat > /tmp/diskpart.cfg << EOF
 <%= @host.diskLayout %>
+EOF
+# ensures a valid disk is addressed in the partition table layout
+# sda is assumed and replaced if it is not correct
+sed -i "s/sda/$(cat /proc/partitions | awk '{ print $4 }' | grep -e "^.d.$" | sort | head -1)/" /tmp/diskpart.cfg
 %end
-<% end -%>
 
 %post --nochroot
 exec < /dev/tty3 > /dev/tty3
@@ -553,6 +571,21 @@ exec < /dev/tty3 > /dev/tty3
 #changing to VT 3 so that we can see whats going on....
 /usr/bin/chvt 3
 (
+<%= snippet 'kickstart_networking_setup' %>
+<%= snippet 'custom_deployment_repositories' %>
+
+# get name of provisioning interface
+PROVISION_IFACE=$(ip route  | awk '$1 == "default" {print $5}' | head -1)
+echo "found provisioning interface = $PROVISION_IFACE"
+
+<% if @host.hostgroup.to_s.include?("Controller") %>
+echo "setting DEFROUTE=no on $PROVISION_IFACE"
+sed -i '
+    /DEFROUTE/ d
+    $ a\DEFROUTE=no
+' /etc/sysconfig/network-scripts/ifcfg-$PROVISION_IFACE
+<% end -%>
+
 #update local time
 echo "updating system time"
 /usr/sbin/ntpdate -sub <%= @host.params['ntp-server'] || '0.fedora.pool.ntp.org' %>
@@ -573,15 +606,17 @@ yum -t -y -e 0 remove firewalld
 
 <% if puppet_enabled %>
 echo "Configuring puppet"
-cat > /etc/puppet/puppet.conf << EOF
-<%= snippet 'puppet.conf' %>
-EOF
+#cat > /etc/puppet/puppet.conf << EOF
+#<% # snippet 'puppet.conf' %>
+#EOF
+#
+## Setup puppet to run on system reboot
+#/sbin/chkconfig --level 345 puppet on
+#
+#/usr/bin/puppet agent --config /etc/puppet/puppet.conf -o --tags no_such_tag <%= @host.puppetmaster.blank? ? '' : "--server #{@host.puppetmaster}" %> --no-daemonize
 
-# Setup puppet to run on system reboot
-/sbin/chkconfig --level 345 puppet on
-
-/usr/bin/puppet agent --config /etc/puppet/puppet.conf -o --tags no_such_tag <%= @host.puppetmaster.blank? ? '' : "--server #{@host.puppetmaster}" %> --no-daemonize
-
+# we reuse our machine registerer instead
+<%= snippet 'staypuft_client_bootstrap' %>
 <% end -%>
 
 sync
@@ -597,6 +632,31 @@ exit 0
 EOS
   end
 
+  def staypuft_bootstrap_snippet
+    <<EOS
+yum install -t -e 0 -y foreman-installer-staypuft-client
+cat > /etc/foreman/staypuft-client-installer.answers.yaml << EOF
+<%= snippet 'staypuft-client-installer-answers-yaml' %>
+EOF
+# Run the installer twice to mitigate potential pluginsync timeouts
+# https://github.com/theforeman/staypuft/pull/414#issuecomment-71828263
+staypuft-client-installer
+staypuft-client-installer
+EOS
+  end
+
+  def staypuft_staypuft_answers_snippet
+    <<EOS
+---
+  puppet:
+    server: false
+    runmode: none
+    puppetmaster: <%= @host.puppetmaster %>
+  foreman::plugin::staypuft_client:
+    staypuft_ssh_public_key: <%= @host.params['staypuft_ssh_public_key'] || 'missing' %>
+EOS
+  end
+
   def template
     <<EOS
 DEFAULT menu
@@ -609,7 +669,7 @@ ONTIMEOUT discovery
 LABEL discovery
 MENU LABEL Foreman Discovery
 KERNEL boot/#{@kernel}
-APPEND rootflags=loop initrd=boot/#{@initrd} root=live:/foreman.iso rootfstype=auto ro rd.live.image rd.live.check rd.lvm=0 rootflags=ro crashkernel=128M elevator=deadline max_loop=256 rd.luks=0 rd.md=0 rd.dm=0 foreman.url=#{@foreman_url} nomodeset selinux=0 stateless
+APPEND rootflags=loop initrd=boot/#{@initrd} root=live:/foreman.iso rootfstype=auto ro rd.live.image rd.live.check rd.lvm=0 rootflags=ro crashkernel=128M elevator=deadline max_loop=256 rd.luks=0 rd.md=0 rd.dm=0 foreman.url=#{@foreman_url} nomodeset selinux=0 stateless biosdevname=0
 IPAPPEND 2
 EOS
   end
@@ -624,11 +684,227 @@ chmod 600 /root/.ssh/authorized_keys
 EOS
   end
 
+  def custom_deployment_repositories_snippet
+    <<'EOS'
+# custom deployment repositories
+<% if @host.deployment.has_custom_repos? -%>
+yum -t -y -e 0 install yum-plugin-priorities
+<% i = 0 -%>
+<% @host.deployment.custom_repos_paths.each do |path| -%>
+<% i +=1 -%>
+cat > /etc/yum.repos.d/staypuft_custom_<%= i -%>.repo << EOF
+[staypuft_custom_<%= i -%>]
+name=Staypuft custom repository <%= i %>
+baseurl=<%= path %>
+gpgcheck=0
+priority=50
+enabled=1
+EOF
+<% end %>
+<% end %>
+EOS
+  end
+
+  def kickstart_networking_setup_snippet
+    <<'EOS'
+<%#
+kind: snippet
+name: kickstart_networking_setup
+description: this will configure your host networking, it configures your primary interface as well
+    as other configures NICs. It supports physical, VLAN and Alias interfaces. It's intended to be
+    called from %post in your kickstart template
+%>
+<% subnet = @host.subnet -%>
+<% dhcp = subnet.dhcp_boot_mode? -%>
+<% bonds = @host.bond_interfaces -%>
+
+# primary interface
+real=`ip -o link | grep <%= @host.mac -%> | awk '{print $2;}' | sed s/://`
+<% if @host.has_primary_interface? %>
+cat << EOF > /etc/sysconfig/network-scripts/ifcfg-$real
+<% unless dhcp || @host.primary_interface_is_bonded? -%>
+IPADDR="<%= @host.ip -%>"
+NETMASK="<%= subnet.mask -%>"
+GATEWAY="<%= subnet.gateway -%>"
+<% end -%>
+DEVICE="$real"
+HWADDR="<%= @host.mac -%>"
+BOOTPROTO="<%= (dhcp && !@host.primary_interface_is_bonded?) ? 'dhcp' : 'none' -%>"
+ONBOOT=yes
+DEFROUTE=no
+<% bonds.each do |bond| -%>
+<% next if !bond.attached_devices_identifiers.include? @host.primary_interface -%>
+MASTER=<%= bond.identifier %>
+SLAVE=yes
+NM_CONTROLLED=no
+PEERDNS=no
+PEERROUTES=no
+<% end -%>
+EOF
+<% end -%>
+
+<% bonded_interfaces = [] -%>
+<% bonds.each do |bond| %>
+<% subnet = bond.subnet -%>
+<% dhcp = subnet.nil? ? false : subnet.dhcp_boot_mode? -%>
+<% tenant_subnet = @host.network_query.tenant_subnet?(subnet, @host) -%>
+<% mtu = @host.network_query.mtu_for_tenant_subnet -%>
+# <%= bond.identifier %> interface
+real="<%= bond.identifier -%>"
+cat << EOF > /etc/sysconfig/network-scripts/ifcfg-$real
+BOOTPROTO="<%= dhcp ? 'dhcp' : 'none' -%>"
+<% unless dhcp || subnet.nil? -%>
+IPADDR="<%= bond.ip -%>"
+NETMASK="<%= subnet.mask -%>"
+GATEWAY="<%= subnet.gateway -%>"
+<% end -%>
+DEVICE="$real"
+ONBOOT=yes
+PEERDNS=no
+PEERROUTES=no
+DEFROUTE=no
+TYPE=Bond
+BONDING_OPTS="<%= bond.bond_options -%> mode=<%= bond.mode -%>"
+BONDING_MASTER=yes
+NM_CONTROLLED=no
+<% if tenant_subnet && mtu -%>
+MTU=<%= mtu %>
+<% end -%>
+EOF
+
+<% @host.interfaces_with_identifier(bond.attached_devices_identifiers).each do |interface| -%>
+<% next if !interface.managed? -%>
+
+<% subnet = interface.subnet -%>
+<% virtual = interface.virtual? -%>
+<% vlan = virtual && subnet.has_vlanid? -%>
+<% alias_type = virtual && !subnet.nil? && !subnet.has_vlanid? && interface.identifier.include?(':') -%>
+<% dhcp = !subnet.nil? && subnet.dhcp_boot_mode? -%>
+
+# <%= interface.identifier %> interface
+real=`ip -o link | grep <%= interface.mac -%> | awk '{print $2;}' | sed s/:$//`
+<% if virtual -%>
+real=`echo <%= interface.identifier -%> | sed s/<%= interface.attached_to -%>/$real/`
+<% end -%>
+
+cat << EOF > /etc/sysconfig/network-scripts/ifcfg-$real
+BOOTPROTO="none"
+DEVICE="$real"
+<% unless virtual -%>
+HWADDR="<%= interface.mac -%>"
+<% end -%>
+ONBOOT=yes
+PEERDNS=no
+PEERROUTES=no
+<% if vlan -%>
+VLAN=yes
+<% elsif alias_type -%>
+TYPE=Alias
+<% end -%>
+NM_CONTROLLED=no
+MASTER=<%= bond.identifier %>
+SLAVE=yes
+DEFROUTE=no
+EOF
+
+<% bonded_interfaces.push(interface.identifier) -%>
+<% end %>
+<% end %>
+
+<% @host.managed_interfaces.each do |interface| %>
+<% next if !interface.managed? -%>
+<% next if bonded_interfaces.include?(interface.identifier) -%>
+
+<% subnet = interface.subnet -%>
+<% virtual = interface.virtual? -%>
+<% vlan = subnet.nil? ? false : virtual && subnet.has_vlanid? -%>
+<% alias_type = subnet.nil? ? false : virtual && !subnet.has_vlanid? && interface.identifier.include?(':') -%>
+<% dhcp = subnet.nil? ? false : subnet.dhcp_boot_mode? -%>
+<% tenant_subnet = @host.network_query.tenant_subnet?(subnet, @host) -%>
+<% mtu = @host.network_query.mtu_for_tenant_subnet -%>
+
+# <%= interface.identifier %> interface
+<% unless virtual -%>
+real=`ip -o link | grep <%= interface.mac -%> | awk '{print $2;}' | sed s/:$//`
+<% else -%>
+real="<%= interface.identifier -%>"
+<% end -%>
+
+cat << EOF > /etc/sysconfig/network-scripts/ifcfg-$real
+BOOTPROTO="<%= dhcp ? 'dhcp' : 'none' -%>"
+<% unless dhcp || subnet.nil? -%>
+IPADDR="<%= interface.ip -%>"
+NETMASK="<%= subnet.mask -%>"
+GATEWAY="<%= subnet.gateway -%>"
+<% end -%>
+DEVICE="$real"
+<% unless virtual -%>
+HWADDR="<%= interface.mac -%>"
+<% end -%>
+ONBOOT=<%= subnet.nil? ? "no" : "yes" %>
+PEERDNS=no
+PEERROUTES=no
+<% if vlan -%>
+VLAN=yes
+<% elsif alias_type -%>
+TYPE=Alias
+<% end -%>
+NM_CONTROLLED=no
+DEFROUTE=no
+<% if tenant_subnet && mtu -%>
+MTU=<%= mtu %>
+<% end -%>
+EOF
+
+<% end %>
+
+# get name of provisioning interface
+PROVISION_IFACE=$(ip route  | awk '$1 == "default" {print $5}' | head -1)
+echo "found provisioning interface = $PROVISION_IFACE"
+DEFROUTE_IFACE=`ip -o link | grep <%= @host.network_query.gateway_interface_mac -%> | awk '{print $2;}' | sed s/:$//`
+echo "found interface with default gateway = $DEFROUTE_IFACE"
+<% gateway_interface = @host.network_query.gateway_interface
+   gateway_is_vlan = @host.network_query.gateway_subnet.has_vlanid?
+   bond_gateway_map = @host.bond_interfaces.map { |bond| bond.identifier == gateway_interface }
+   gateway_is_bond = false
+   bond_gateway_map.each do |is_gateway|
+     next if gateway_is_bond
+     gateway_is_bond = is_gateway
+   end -%>
+
+IFACES=$(ls -d /sys/class/net/* | while read iface; do readlink $iface | grep -q virtual || echo ${iface##*/}; done)
+<% if gateway_is_vlan or gateway_is_bond -%>
+IFACES="$IFACES <%= gateway_interface %>"
+DEFROUTE_IFACE="<%= gateway_interface %>"
+echo "gateway interface is a vlan and/or bond = $DEFROUTE_IFACE"
+<% end -%>
+for i in $IFACES; do
+    if [ "$i" != "$PROVISION_IFACE" ]; then
+        echo "setting PEERDNS=no on $i"
+        sed -i '
+            /PEERDNS/ d
+            $ a\PEERDNS=no
+        ' /etc/sysconfig/network-scripts/ifcfg-$i
+    fi
+
+    if [ "$i" = "$DEFROUTE_IFACE" ]; then
+        echo "setting DEFROUTE=yes on $i"
+        sed -i '
+            /DEFROUTE/ d
+            $ a\DEFROUTE=yes
+        ' /etc/sysconfig/network-scripts/ifcfg-$i
+    fi
+done
+
+EOS
+  end
+
   def lvm_w_cinder_volumes
     <<'EOS'
 #Dynamic
 zerombr
 clearpart --all --initlabel
+part biosboot --fstype=biosboot --size=1 --ondisk=sda
 part /boot --fstype ext3 --size=500 --ondisk=sda
 part swap --size=1024 --ondisk=sda
 part pv.01 --size=1024 --grow --maxsize=102400 --ondisk=sda
@@ -644,6 +920,7 @@ EOS
 #Dynamic
 zerombr
 clearpart --all --initlabel
+part biosboot --fstype=biosboot --size=1 --ondisk=sda
 part /boot --fstype ext3 --size=500 --ondisk=sda
 part swap --size=1024 --ondisk=sda
 part pv.01 --size=1024 --grow --ondisk=sda
@@ -766,28 +1043,30 @@ name: redhat_register
       subscription-manager config --server.proxy_user="<%= @host.params['http-proxy-user'] %>"
     <% end %>
     <% if @host.params['http-proxy-password'] %>
-      subscription-manager config --server.proxy_password="<%= @host.params['http-proxy-password'] %>"
+      subscription-manager config --server.proxy_password='<%= @host.params['http-proxy-password'] %>'
     <% end %>
     <% if @host.params['http-proxy-port'] %>
       subscription-manager config --server.proxy_port="<%= @host.params['http-proxy-port'] %>"
     <% end %>
   <% end %>
   <% if @host.params['subscription_manager_username'] && @host.params['subscription_manager_password'] %>
-    subscription-manager register --username="<%= @host.params['subscription_manager_username'] %>" --password="<%= @host.params['subscription_manager_password'] %>" --auto-attach
     <% if @host.params['subscription_manager_pool'] %>
+      subscription-manager register --username='<%= @host.params['subscription_manager_username'] %>' --password='<%= @host.params['subscription_manager_password'] %>'
       subscription-manager attach --pool="<%= @host.params['subscription_manager_pool'] %>"
+    <% else %>
+      subscription-manager register --username="<%= @host.params['subscription_manager_username'] %>" --password="<%= @host.params['subscription_manager_password'] %>" --auto-attach
     <% end %>
     # workaround for RHEL 6.4 bug https://bugzilla.redhat.com/show_bug.cgi?id=1008016
     subscription-manager repos --list > /dev/null
-    <% (enabled_repos = "subscription-manager repos --enable #{@host.params['subscription_manager_repos'].gsub(',', ' ')}") if @host.params['subscription_manager_repos'] %>
-    <%= enabled_repos if enabled_repos %>
+    subscription-manager repos --disable=*
+    <%= "subscription-manager repos #{@host.params['subscription_manager_repos'].split(/[\s,]/).reject { |r| r.empty? }.map { |r| '--enable=' + r }.join(' ')}" if @host.params['subscription_manager_repos'] %>
   <% elsif @host.params['activation_key'] %>
     rpm -Uvh <%= @host.params['subscription_manager_host'] %>/pub/candlepin-cert-consumer-latest.noarch.rpm
     subscription-manager register --org="<%= @host.params['subscription_manager_org'] %>" --activationkey="<%= @host.params['activation_key'] %>"
     # workaround for RHEL 6.4 bug https://bugzilla.redhat.com/show_bug.cgi?id=1008016
     subscription-manager repos --list > /dev/null
-    <% (enabled_repos = "subscription-manager repos --enable #{@host.params['subscription_manager_repos'].gsub(',', ' ')}") if @host.params['subscription_manager_repos'] %>
-    <%= enabled_repos if enabled_repos %>
+    subscription-manager repos --disable=*
+    <%= "subscription-manager repos #{@host.params['subscription_manager_repos'].split(',').map { |r| '--enable=' + r.strip }.join(' ')}" if @host.params['subscription_manager_repos'] %>
   <% else %>
     # Not registering host.params['activation_key'] not found.
   <% end %>

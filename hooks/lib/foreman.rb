@@ -15,6 +15,8 @@ class Foreman
       :environment => 'Environment',
       :setting => 'Setting',
       :template_combination => 'TemplateCombination',
+      :puppetclass => 'Puppetclass',
+      :smart_class_parameter => 'SmartClassParameter',
   }
 
   def initialize(options)
@@ -62,6 +64,17 @@ class Foreman
       @api_resource.respond_to?(name) || super
     end
 
+    def find_or_ensure(condition, attributes)
+      object = first(condition)
+      if object.nil?
+        object, _ = @api_resource.create({@name.to_s => attributes})
+      elsif should_update?(object, attributes)
+        object, _ = @api_resource.update({'id' => object['id']}.merge({@name.to_s => attributes}))
+        object = first(condition)
+      end
+      object
+    end
+
     def show_or_ensure(identifier, attributes)
       begin
         object, _ = @api_resource.show(identifier)
@@ -75,10 +88,10 @@ class Foreman
       object
     end
 
-    def show!(*args)
-      error_message = args.delete(:error_message) || 'unknown error'
+    def show!(options={})
+      error_message = options.delete(:error_message) || 'unknown error'
       begin
-        object, _ = @api_resource.show(*args)
+        object, _ = @api_resource.show(options)
       rescue RestClient::ResourceNotFound
         raise StandardError, error_message
       end

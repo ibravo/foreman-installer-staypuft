@@ -11,7 +11,11 @@ class SubscriptionSeeder < BaseSeeder
     rescue => e
       @logger.debug "Host was not found, retrying in 5 seconds (#{current}/#{max_tries})"
       sleep 5
-      retry if current < max_tries
+      if current < max_tries
+        retry
+      else
+        raise
+      end
     end
 
     @os = find_default_os(foreman_host)
@@ -19,7 +23,7 @@ class SubscriptionSeeder < BaseSeeder
 
     @sm_username = @config.get_custom(:sm_username) || ''
     @sm_password = @config.get_custom(:sm_password) || ''
-    @repositories = @config.get_custom(:repositories) || 'rhel-7-server-openstack-5.0-rpms'
+    @repositories = @config.get_custom(:repositories) || 'rhel-7-server-rpms rhel-7-server-openstack-6.0-rpms rhel-7-server-openstack-6.0-installer-rpms rhel-ha-for-rhel-7-server-rpms rhel-7-server-rh-common-rpms'
     @sm_proxy_user = @config.get_custom(:sm_proxy_user) || ''
     @sm_proxy_password = @config.get_custom(:sm_proxy_password) || ''
     @sm_proxy_host = @config.get_custom(:sm_proxy_host) || ''
@@ -189,18 +193,19 @@ class SubscriptionSeeder < BaseSeeder
   end
 
   def get_credentials
+    wideness = 38
     choose do |menu|
       menu.header = HighLine.color("\nEnter your subscription manager credentials", :important)
       menu.select_by = :index
       menu.prompt = ''
-      menu.choice('Subscription manager username: '.ljust(37) + HighLine.color(@sm_username, :info)) { @sm_username = ask("Username: ") }
-      menu.choice('Subscription manager password: '.ljust(37) + HighLine.color('*' * @sm_password.size, :info)) { @sm_password = ask("Password: ") { |q| q.echo = "*" } }
-      menu.choice('Comma separated repositories: '.ljust(37) + HighLine.color(@repositories, :info)) { @repositories = ask("Repositories: ") }
-      menu.choice('Subscription manager pool (optional): '.ljust(37) + HighLine.color(@sm_pool, :info)) { @sm_pool = ask("Pool: ") }
-      menu.choice('Subscription manager proxy hostname: '.ljust(37) + HighLine.color(@sm_proxy_host, :info)) { @sm_proxy_host = ask("Proxy Host: ") }
-      menu.choice('Subscription manager proxy port: '.ljust(37) + HighLine.color(@sm_proxy_port, :info)) { @sm_proxy_port = ask("Proxy Port: ") }
-      menu.choice('Subscription manager proxy username: '.ljust(37) + HighLine.color(@sm_proxy_user, :info)) { @sm_proxy_user = ask("Proxy User: ") }
-      menu.choice('Subscription manager proxy password: '.ljust(37) + HighLine.color(@sm_proxy_password, :info)) { @sm_proxy_password = ask("Proxy Password: ") }
+      menu.choice('Subscription manager username: '.ljust(wideness) + HighLine.color(@sm_username, :info)) { @sm_username = ask("Username: ") }
+      menu.choice('Subscription manager password: '.ljust(wideness) + HighLine.color('*' * @sm_password.size, :info)) { @sm_password = ask("Password: ") { |q| q.echo = "*" } }
+      menu.choice('Comma or Space separated repositories: '.ljust(wideness) + HighLine.color(@repositories, :info)) { @repositories = ask("Repositories: ") }
+      menu.choice('Subscription manager pool (recommended): '.ljust(wideness) + HighLine.color(@sm_pool, :info)) { @sm_pool = ask("Pool: ") }
+      menu.choice('Subscription manager proxy hostname: '.ljust(wideness) + HighLine.color(@sm_proxy_host, :info)) { @sm_proxy_host = ask("Proxy Host: ") }
+      menu.choice('Subscription manager proxy port: '.ljust(wideness) + HighLine.color(@sm_proxy_port, :info)) { @sm_proxy_port = ask("Proxy Port: ") }
+      menu.choice('Subscription manager proxy username: '.ljust(wideness) + HighLine.color(@sm_proxy_user, :info)) { @sm_proxy_user = ask("Proxy User: ") }
+      menu.choice('Subscription manager proxy password: '.ljust(wideness) + HighLine.color(@sm_proxy_password, :info)) { @sm_proxy_password = ask("Proxy Password: ") }
       menu.choice(HighLine.color('Proceed with configuration', :run)) {
         @skip = false; false
       }
